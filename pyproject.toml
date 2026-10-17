@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdrexplorer-digital"
+version = "1.0.0"
+description = "Digital voice and trunking decode for sdrexplorer: op25 (P25, DMR, SmartNet) and dsd-fme (NXDN, EDACS)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Bad Larry", email = "thebadlarry@proton.me" }]
+classifiers = ["License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+               "Programming Language :: Python :: 3"]
+# sdrexplorer itself (and GNU Radio, which isn't on PyPI) must already be installed
+dependencies = ["numpy>=1.24", "scipy>=1.8"]
+
+[project.entry-points."sdrexplorer.modules"]
+digital = "sdrexplorer_digital.module:DigitalModule"
+
+[project.entry-points."sdrexplorer.proofs"]
+digital = "sdrexplorer_digital.proofs:PROOFS"
+
+[tool.setuptools.packages.find]
+where = ["src"]

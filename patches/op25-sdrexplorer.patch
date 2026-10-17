@@ -1,0 +1,976 @@
+# op25 (boatbod/op25 @ da5374d), seven independent changes; apply in a clean checkout: git apply
+#   1. (upstream since da5374d: boatbod/op25 #306, the op25_crypt_algs destructor fix)
+#   2. apps/tx/op25_c4fm_mod.py: transfer_function_nxdn() and _nxdn_tx() accept the rate_multiplier argument
+#      that c4fm_taps.generate() passes to every generator (NXDN filter taps failed with a TypeError)
+#   3. DMR: the color code as a trailing byte of the CACH SLC, CSBK, voice LC, terminator LC and embedded LC
+#      messages (dmr_slot.cc/.h, dmr_cai.cc)
+#   4. P25 Phase 1 TX: a settable NAC and Link Control (vocoder set_nac() / set_lc(); the defaults keep the
+#      fixed NAC 0x293 and preset LC)
+#   5. dmr_ms_tx_bb: a DMR mobile-station voice transmitter block (bursts a repeater's receiver accepts)
+#   6. dmr_bs_tx_bb: embedded LC in voice bursts B-E and a null embedded field with the EMB in burst F (it sent
+#      fragments in B, C, E, F and an all-zero burst D, so no receiver could assemble the LC: no TG / source)
+#   7. dmr_bs_tx_bb: a disabled timeslot sends idle data bursts (slot type: CC + data type 9) instead of the
+#      silence encoder's AMBE under the data sync, which receivers decoded as garbage headers and voice
+#   8. dmr receive: the color code learned on one timeslot also applies to the other (dmr_slot::adopt_cc),
+#      so a call with no data burst on its own slot (no voice LC header) still has its EMBs accepted
+# Upstream-Status: 1 merged (#306); open on boatbod/op25 dev: 2 (#307), 3 (#308), 6 (#309), 4 (#310); 7 (after 6) and 8 (after 3)
+# next; 5 on hold
+diff --git a/op25/gr-op25_repeater/apps/tx/op25_c4fm_mod.py b/op25/gr-op25_repeater/apps/tx/op25_c4fm_mod.py
+index 0d384a0e..ea274eb6 100755
+--- a/op25/gr-op25_repeater/apps/tx/op25_c4fm_mod.py
++++ b/op25/gr-op25_repeater/apps/tx/op25_c4fm_mod.py
+@@ -124,12 +124,16 @@ def _transfer_function_nxdn(symbol_rate, modulator=False):
+ 		xfer.append(hf * df)
+ 	return xfer
+ 
++# rate_multiplier is accepted (and ignored) only so these match
++# transfer_function_rx/_tx's signature: c4fm_taps.generate() passes it to
++# every generator, and the NXDN transfer function has no rate-dependent term.
++
+ # rx / demod case
+-def transfer_function_nxdn(symbol_rate=_def_symbol_rate):
++def transfer_function_nxdn(symbol_rate=_def_symbol_rate, rate_multiplier=1.0):
+ 	return _transfer_function_nxdn(symbol_rate)
+ 
+ # tx / modulator case
+-def transfer_function_nxdn_tx(symbol_rate=_def_symbol_rate):
++def transfer_function_nxdn_tx(symbol_rate=_def_symbol_rate, rate_multiplier=1.0):
+ 	return _transfer_function_nxdn(symbol_rate, modulator=True)
+ 
+ class c4fm_taps(object):
+diff --git a/op25/gr-op25_repeater/include/gnuradio/op25_repeater/CMakeLists.txt b/op25/gr-op25_repeater/include/gnuradio/op25_repeater/CMakeLists.txt
+index 848a9551..dbea458d 100644
+--- a/op25/gr-op25_repeater/include/gnuradio/op25_repeater/CMakeLists.txt
++++ b/op25/gr-op25_repeater/include/gnuradio/op25_repeater/CMakeLists.txt
+@@ -31,5 +31,6 @@ install(FILES
+     ambe_encoder_sb.h
+     ysf_tx_sb.h
+     dstar_tx_sb.h
++    dmr_ms_tx_bb.h
+     fsk4_slicer_fb.h DESTINATION include/gnuradio/op25_repeater
+ )
+diff --git a/op25/gr-op25_repeater/include/gnuradio/op25_repeater/dmr_ms_tx_bb.h b/op25/gr-op25_repeater/include/gnuradio/op25_repeater/dmr_ms_tx_bb.h
+new file mode 100644
+index 00000000..699516ad
+--- /dev/null
++++ b/op25/gr-op25_repeater/include/gnuradio/op25_repeater/dmr_ms_tx_bb.h
+@@ -0,0 +1,38 @@
++/* -*- c++ -*- */
++/*
++ * DMR mobile-station voice TX. Emits mobile-station bursts (voice LC header, embedded-LC
++ * voice superframes, terminator) that a repeater's receiver accepts — unlike dmr_bs_tx_bb, which makes
++ * base-station (repeater-output) bursts. The FEC'd constant bursts are precomputed by the Python side
++ * and loaded from the config file; this block does the rate-locked AMBE interleaving.
++ *
++ * This is free software under the GNU General Public License v3 or later; see COPYING.
++ */
++
++#ifndef INCLUDED_OP25_REPEATER_DMR_MS_TX_BB_H
++#define INCLUDED_OP25_REPEATER_DMR_MS_TX_BB_H
++
++#include <gnuradio/op25_repeater/api.h>
++#include <gnuradio/block.h>
++
++namespace gr {
++  namespace op25_repeater {
++
++    /*!
++     * \brief DMR mobile-station voice transmitter (single logical channel).
++     * \ingroup op25_repeater
++     */
++    class OP25_REPEATER_API dmr_ms_tx_bb : virtual public gr::block
++    {
++     public:
++      typedef std::shared_ptr<dmr_ms_tx_bb> sptr;
++
++      static sptr make(int verbose_flag, const char * config_file);
++
++      /*! Append the call terminator (call Python-side on PTT release). */
++      virtual void send_terminator() = 0;
++    };
++
++  } // namespace op25_repeater
++} // namespace gr
++
++#endif /* INCLUDED_OP25_REPEATER_DMR_MS_TX_BB_H */
+diff --git a/op25/gr-op25_repeater/include/gnuradio/op25_repeater/vocoder.h b/op25/gr-op25_repeater/include/gnuradio/op25_repeater/vocoder.h
+index 3ca449cb..272c596a 100644
+--- a/op25/gr-op25_repeater/include/gnuradio/op25_repeater/vocoder.h
++++ b/op25/gr-op25_repeater/include/gnuradio/op25_repeater/vocoder.h
+@@ -48,6 +48,10 @@ namespace gr {
+        */
+       static sptr make(bool encode_flag, bool verbose_flag, int stretch_amt, char* udp_host, int udp_port, bool raw_vectors_flag);
+       virtual void set_gain_adjust(float gain_adjust) {}
++      // P25 TX: NAC and Link Control (clear voice). The defaults keep the
++      // fixed NAC 0x293 and the preset LC.
++      virtual void set_nac(int nac) {}
++      virtual void set_lc(int lco, int mfid, int svcopt, int s, int tgid, int dst, int src) {}
+     };
+ 
+   } // namespace op25_repeater
+diff --git a/op25/gr-op25_repeater/lib/CMakeLists.txt b/op25/gr-op25_repeater/lib/CMakeLists.txt
+index 4a888736..01625de9 100644
+--- a/op25/gr-op25_repeater/lib/CMakeLists.txt
++++ b/op25/gr-op25_repeater/lib/CMakeLists.txt
+@@ -23,6 +23,7 @@ include(GNUInstallDirs)
+ list(APPEND op25_repeater_sources
+     ambe_encoder_sb_impl.cc
+     dmr_bs_tx_bb_impl.cc
++    dmr_ms_tx_bb_impl.cc
+     ysf_tx_sb_impl.cc
+     dstar_tx_sb_impl.cc
+     vocoder_impl.cc
+diff --git a/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.cc b/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.cc
+index 0fed4c52..ad775810 100644
+--- a/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.cc
++++ b/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.cc
+@@ -70,6 +70,25 @@ static inline int load_i(const uint8_t val[], int len) {
+ 	return acc;
+ }
+ 
++// Golay(20,8) parity of the slot type (ETSI TS 102 361-1 B.3.10): row i = the 12 parity bits of data bit i
++static const uint8_t golay_20_8_parity[8][12] = {
++	{0,0,1,1,1,1,0,1,1,0,1,0}, {1,1,0,1,1,0,0,1,1,0,0,1}, {0,1,1,0,1,1,0,0,1,1,0,1},
++	{0,0,1,1,0,1,1,0,0,1,1,1}, {1,1,0,1,1,1,0,0,0,1,1,0}, {1,0,1,0,1,0,0,1,0,1,1,1},
++	{1,0,0,1,0,0,1,1,1,1,1,0}, {1,0,0,0,1,1,1,0,1,0,1,1}};
++
++// slot type: color code (4) + data type (4) + Golay(20,8) parity (12)
++static void encode_slot_type(int cc, int data_type, uint8_t result[20]) {
++	int acc = (cc << 4) | data_type;
++	for (int i=0; i<8; i++)
++		result[i] = (acc >> (7-i)) & 1;
++	for (int j=0; j<12; j++) {
++		int p = 0;
++		for (int i=0; i<8; i++)
++			p ^= result[i] & golay_20_8_parity[i][j];
++		result[8+j] = p;
++	}
++}
++
+ static void encode_emb(int cc, int pi, int lcss, uint8_t result[16]) {
+ 	int acc = (cc << 3) | (pi << 2) | lcss;
+ 	acc = hamming_16_7[acc];
+@@ -361,6 +380,29 @@ dmr_bs_tx_bb_impl::config()
+ 			bits_to_dibits(&d_embedded[i][j*24], emb_buf, 24);
+ 		}
+ 	}
++	// burst F of a voice superframe: the EMB (color code, LCSS 0 = single fragment) around a null
++	// embedded signaling field, so the burst still carries the color code
++	for (int i=0; i<2; i++) {
++		uint8_t null_emb[16];
++		encode_emb(d_cc[i], 0, 0, null_emb);
++		memset(emb_buf, 0, sizeof(emb_buf));
++		memcpy(&emb_buf[0], &null_emb[0], 8);
++		memcpy(&emb_buf[40], &null_emb[8], 8);
++		bits_to_dibits(d_null_embedded[i], emb_buf, 24);
++	}
++	// a disabled timeslot sends idle data bursts (data type 9): an all-zero info field (a valid
++	// BPTC(196,96) codeword; receivers don't use an idle burst's payload), the slot type around the BS data
++	// sync. Before, its bursts were the silence encoder's AMBE under the data sync, which receivers decoded
++	// as garbage headers and voice.
++	for (int i=0; i<2; i++) {
++		uint8_t st_bits[20], st_dibits[10];
++		encode_slot_type(d_cc[i], 9, st_bits);
++		bits_to_dibits(st_dibits, st_bits, 10);
++		memset(d_idle_body[i], 0, 132);
++		memcpy(&d_idle_body[i][49], &st_dibits[0], 5);		// info 49 | slot type 5 | sync 24 | slot type 5 | info 49
++		memcpy(&d_idle_body[i][54], dmr_bs_idle_sync, 24);
++		memcpy(&d_idle_body[i][78], &st_dibits[5], 5);
++	}
+ }
+ 
+ void
+@@ -380,13 +422,16 @@ dmr_bs_tx_bb_impl::general_work (int noutput_items,
+ 			       gr_vector_void_star &output_items)
+ {
+ 
++  // ETSI TS 102 361-1: voice burst A carries the sync, bursts B-E the four embedded LC fragments (LCSS
++  // 1, 3, 3, 2) and burst F a null embedded field (the reverse-channel slot). Timeslot 2 runs 3 bursts
++  // behind timeslot 1.
+   static const int burst_schedule[2][6] = {
+     // -3: idle SYNC
+     // -2: voice SYNC
+-    // -1: RC
++    // -1: null embedded signaling (burst F)
+     // 0|1|2|3: segment no. of embedded signalling
+-    {-2, 0, 1, -1, 2, 3},
+-    {-1, 2, 3, -2, 0, 1}
++    {-2, 0, 1, 2, 3, -1},
++    {2, 3, -1, -2, 0, 1}
+   };
+ 
+   int nconsumed[2] = {0,0};
+@@ -402,15 +447,28 @@ dmr_bs_tx_bb_impl::general_work (int noutput_items,
+ 
+     int cach_id = ((d_next_burst & 1) << 1) + d_next_slot;
+     memcpy(&out[0], d_cach[cach_id], 12);
++    if (!d_en[d_next_slot]) {
++      // disabled timeslot: an idle data burst (its input codewords are consumed all the same, so the
++      // two inputs keep the same pace)
++      memcpy(&out[12], d_idle_body[d_next_slot], 132);
++      in[d_next_slot] += 108;
++      out += 144;
++      nconsumed[d_next_slot] += 3;
++      d_next_slot = (d_next_slot + 1) & 1;
++      if (d_next_slot == 0)
++        d_next_burst = (d_next_burst + 1) % 6;
++      nframes++;
++      continue;
++    }
+     memcpy(&out[12], &in[d_next_slot][0], 36);
+     memcpy(&out[48], &in[d_next_slot][36], 18);
+     int schedule = burst_schedule[d_next_slot][d_next_burst];
+-    if (schedule == -3 || !d_en[d_next_slot])
++    if (schedule == -3)
+       memcpy(&out[66], dmr_bs_idle_sync, 24);
+     else if (schedule == -2)
+       memcpy(&out[66], dmr_bs_voice_sync, 24);
+     else if (schedule == -1)
+-      memset(&out[66], 0, 24);
++      memcpy(&out[66], d_null_embedded[d_next_slot], 24);
+     else 
+       memcpy(&out[66], &d_embedded[d_next_slot][schedule*24], 24);
+     memcpy(&out[90], &in[d_next_slot][36+18], 18);
+diff --git a/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.h b/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.h
+index f513b044..5b26959d 100644
+--- a/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.h
++++ b/op25/gr-op25_repeater/lib/dmr_bs_tx_bb_impl.h
+@@ -63,6 +63,8 @@ namespace gr {
+ 	int d_next_slot;
+ 	uint8_t d_cach[4][12];
+ 	uint8_t d_embedded[2][4*24];
++	uint8_t d_null_embedded[2][24];	// burst F: EMB (LCSS 0) + null embedded signaling
++	uint8_t d_idle_body[2][132];	// a disabled timeslot's burst after the CACH: an idle data burst
+     };
+ 
+   } // namespace op25_repeater
+diff --git a/op25/gr-op25_repeater/lib/dmr_cai.cc b/op25/gr-op25_repeater/lib/dmr_cai.cc
+index f832e572..b97b0fd5 100644
+--- a/op25/gr-op25_repeater/lib/dmr_cai.cc
++++ b/op25/gr-op25_repeater/lib/dmr_cai.cc
+@@ -121,6 +121,8 @@ dmr_cai::load_frame(const uint8_t fr_sym[], bool& unmute) {
+ 
+ 	// decode the slot data
+ 	unmute = d_slot[d_chan].load_slot(d_frame + 24, sl_sync);
++	if (d_slot[d_chan].get_cc() != 0x0)
++		d_slot[d_chan ^ 1].adopt_cc(d_slot[d_chan].get_cc());
+ 
+ 	return sync_rxd;
+ }
+@@ -221,12 +223,15 @@ dmr_cai::decode_shortLC()
+ 		d2 |= slc[i+20];
+ 	}
+ 
+-	// send up the stack for further processing
+-	std::string slc_msg(4,0);
++	// send up the stack for further processing (trailing byte: color code,
++	// learned by the per-slot dmr_slot instance from the burst sync/EMB and
++	// otherwise invisible to dmr_cai, which only ever sees the CACH)
++	std::string slc_msg(5,0);
+         slc_msg[0] = slco;
+ 	slc_msg[1] = d0;
+ 	slc_msg[2] = d1;
+ 	slc_msg[3] = d2;
++	slc_msg[4] = d_slot[d_chan].get_cc();
+ 	send_msg(slc_msg, M_DMR_CACH_SLC);
+ 
+ 	// decode a little further for logging purposes
+diff --git a/op25/gr-op25_repeater/lib/dmr_ms_tx_bb_impl.cc b/op25/gr-op25_repeater/lib/dmr_ms_tx_bb_impl.cc
+new file mode 100644
+index 00000000..c842a8d1
+--- /dev/null
++++ b/op25/gr-op25_repeater/lib/dmr_ms_tx_bb_impl.cc
+@@ -0,0 +1,173 @@
++/* -*- c++ -*- */
++/*
++ * DMR mobile-station voice TX. See dmr_ms_tx_bb_impl.h.
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <gnuradio/io_signature.h>
++#include "dmr_ms_tx_bb_impl.h"
++
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++namespace gr {
++  namespace op25_repeater {
++
++    dmr_ms_tx_bb::sptr
++    dmr_ms_tx_bb::make(int verbose_flag, const char * config_file)
++    {
++      return gnuradio::get_initial_sptr
++        (new dmr_ms_tx_bb_impl(verbose_flag, config_file));
++    }
++
++//////////////////////////////////////////////////////////////////////////
++// in : AMBE codewords (36 dibits, char) on ONE channel (the single logical channel)
++// out: dibits (char, 0..3) in 144-dibit bursts (1 per 30 ms)
++// A mobile-station voice call: [voice LC header] [voice superframes A..F]* [terminator].
++// Voice burst dibit map (same geometry as dmr_bs_tx_bb):
++//   00-11 CACH(12) | 12-47 VC1(36) | 48-65 VC2a(18) | 66-89 mid(24) | 90-107 VC2b(18) | 108-143 VC3(36)
++// The header, terminator, CACH, voice sync and the 4 embedded-LC middle fields are precomputed with
++// full FEC by the Python side and read from the config file; this block interleaves AMBE and sequences
++// the bursts only.
++
++static const int MIN_IN = 1;
++static const int MAX_IN = 1;
++static const int MIN_OUT = 1;
++static const int MAX_OUT = 1;
++
++    dmr_ms_tx_bb_impl::dmr_ms_tx_bb_impl(int verbose_flag, const char * config_file)
++      : gr::block("dmr_ms_tx_bb",
++              gr::io_signature::make(MIN_IN, MAX_IN, 36),
++              gr::io_signature::make(MIN_OUT, MAX_OUT, sizeof(char))),
++        d_verbose_flag(verbose_flag),
++        d_config_file(config_file),
++        d_vc(0),
++        d_preamble(2),             // 2 idle bursts (288 dibits) for the receiver to acquire sync
++        d_headers(2),              // 2 voice LC headers at call start (robust acquisition)
++        d_idle_next(false),
++        d_send_term(false),
++        d_sent_term(false)
++    {
++      memset(d_header, 0, sizeof(d_header));
++      memset(d_term, 0, sizeof(d_term));
++      memset(d_cach, 0, sizeof(d_cach));
++      memset(d_mid, 0, sizeof(d_mid));
++      config();
++      set_output_multiple(144);
++      set_history(3);                 // need >= 3 AMBE codewords for a voice burst
++    }
++
++    dmr_ms_tx_bb_impl::~dmr_ms_tx_bb_impl() {}
++
++    // Config file: a flat binary of dibit bytes (0..3), in order:
++    //   header[144] term[144] cach[12] mid0[24] mid1[24] mid2[24] mid3[24] mid4[24] mid5[24]
++    // = 144+144+12+6*24 = 444 bytes, written by the Python side that builds the bursts.
++    void dmr_ms_tx_bb_impl::config() {
++      FILE * fp = fopen(d_config_file, "rb");
++      if (!fp) {
++        fprintf(stderr, "dmr_ms_tx_bb: cannot open config %s\n", d_config_file);
++        return;
++      }
++      uint8_t buf[444];
++      size_t n = fread(buf, 1, sizeof(buf), fp);
++      fclose(fp);
++      if (n != sizeof(buf)) {
++        fprintf(stderr, "dmr_ms_tx_bb: short config %zu != %zu\n", n, sizeof(buf));
++        return;
++      }
++      size_t p = 0;
++      memcpy(d_header, &buf[p], 144); p += 144;
++      memcpy(d_term,   &buf[p], 144); p += 144;
++      memcpy(d_cach,   &buf[p], 12);  p += 12;
++      for (int i = 0; i < 6; i++) { memcpy(d_mid[i], &buf[p], 24); p += 24; }
++    }
++
++    void dmr_ms_tx_bb_impl::send_terminator() {
++      d_send_term = true;
++    }
++
++    void dmr_ms_tx_bb_impl::forecast(int noutput_items, gr_vector_int &ninput_items_required) {
++      // Only HALF the output bursts are voice (each voice burst is followed by a 144-dibit idle slot);
++      // the idle/header/terminator bursts need no input. Requesting 3 codewords per OUTPUT burst (as if
++      // every burst were voice) over-asks input 2x, so the scheduler blocks waiting for AMBE that is
++      // never consumed -> the vocoder is throttled and voice falls behind (choppy). Request 3 codewords
++      // per VOICE burst only (~nbursts/2). >=1 so the scheduler never stalls on a 0 request.
++      const int nbursts = noutput_items / 144;
++      int reqd = 3 * ((nbursts + 1) / 2);
++      if (reqd < 1) reqd = 1;
++      std::fill(ninput_items_required.begin(), ninput_items_required.end(), reqd);
++    }
++
++    int dmr_ms_tx_bb_impl::general_work(int noutput_items,
++                                        gr_vector_int &ninput_items,
++                                        gr_vector_const_void_star &input_items,
++                                        gr_vector_void_star &output_items) {
++      const uint8_t *in = (const uint8_t *) input_items[0];
++      uint8_t *out = (uint8_t *) output_items[0];
++      int nconsumed = 0;
++      int nout = 0;
++      int bursts = noutput_items / 144;
++
++      for (int n = 0; n < bursts; n++) {
++        // DMR same-slot cadence: every content burst is followed by a 144-dibit idle (the other TDMA
++        // slot). dsd-fme's MS loop reads 144 then skips 144; without the gap its superframe tracking
++        // drifts. The idle also fills the preamble/post-term tail.
++        if (d_idle_next) {
++          memset(out, 0, 144);
++          out += 144; nout += 144;
++          d_idle_next = false;
++          continue;
++        }
++        // 0) idle preamble so the receiver can acquire bit/frame sync before the header
++        if (d_preamble > 0) {
++          memset(out, 0, 144);
++          out += 144; nout += 144;
++          d_preamble--;
++          continue;
++        }
++        if (d_sent_term)
++          break;                       // call ended; nothing more to emit
++        // 1) voice LC header(s) at the start of the call
++        if (d_headers > 0) {
++          memcpy(out, d_header, 144);
++          out += 144; nout += 144;
++          d_headers--;
++          d_idle_next = true;
++          continue;
++        }
++        // 2) terminator (on PTT release), then stop producing
++        if (d_send_term && !d_sent_term) {
++          memcpy(out, d_term, 144);
++          out += 144; nout += 144;
++          d_sent_term = true;
++          d_send_term = false;
++          d_idle_next = true;
++          continue;
++        }
++        // 3) voice burst: needs 3 AMBE codewords
++        if ((ninput_items[0] - nconsumed) < 3)
++          break;
++        const uint8_t *cw = in + nconsumed * 36;   // 3 codewords = 108 dibits (VC1 VC2 VC3)
++        memcpy(&out[0],   d_cach, 12);
++        memcpy(&out[12],  &cw[0], 36);             // VC1
++        memcpy(&out[48],  &cw[36], 18);            // VC2 first half
++        memcpy(&out[66],  d_mid[d_vc], 24);        // sync (A) / embedded LC (B-E) / CC-EMB (F)
++        memcpy(&out[90],  &cw[36 + 18], 18);       // VC2 second half
++        memcpy(&out[108], &cw[36 + 36], 36);       // VC3
++        out += 144; nout += 144;
++        nconsumed += 3;
++        d_vc = (d_vc + 1) % 6;
++        d_idle_next = true;
++      }
++
++      if (nconsumed)
++        consume(0, nconsumed);
++      return nout;
++    }
++
++  } /* namespace op25_repeater */
++} /* namespace gr */
+diff --git a/op25/gr-op25_repeater/lib/dmr_ms_tx_bb_impl.h b/op25/gr-op25_repeater/lib/dmr_ms_tx_bb_impl.h
+new file mode 100644
+index 00000000..9cdcf9e4
+--- /dev/null
++++ b/op25/gr-op25_repeater/lib/dmr_ms_tx_bb_impl.h
+@@ -0,0 +1,58 @@
++/* -*- c++ -*- */
++/*
++ * DMR mobile-station voice TX. Mirrors dmr_bs_tx_bb but emits
++ * MOBILE-station bursts (what a repeater's receiver accepts): a single logical
++ * channel with a voice LC header, voice superframes carrying the embedded LC,
++ * and a terminator. The constant bursts (header/terminator/embedded-LC middle
++ * fields/sync/CACH) with all their FEC (BPTC(196,96), RS(12,9), Golay(20,8),
++ * QR(16,7,6), BPTC(128,77), Hamming) are precomputed by the Python side
++ * (verified against dsd-fme's decoder) and loaded here as
++ * ready dibit buffers; this block only does rate-locked AMBE interleaving and
++ * burst sequencing (like dmr_bs_tx_bb), so no FEC is reimplemented in C++.
++ */
++
++#ifndef INCLUDED_OP25_REPEATER_DMR_MS_TX_BB_IMPL_H
++#define INCLUDED_OP25_REPEATER_DMR_MS_TX_BB_IMPL_H
++
++#include <gnuradio/op25_repeater/dmr_ms_tx_bb.h>
++#include <stdint.h>
++
++namespace gr {
++  namespace op25_repeater {
++
++    class dmr_ms_tx_bb_impl : public dmr_ms_tx_bb
++    {
++     private:
++      void config(void);
++      int d_verbose_flag;
++      const char * d_config_file;
++      // Precomputed dibit buffers from the config file (all 0..3):
++      uint8_t d_header[144];     // voice LC header data burst
++      uint8_t d_term[144];       // terminator-with-LC data burst
++      uint8_t d_cach[12];        // CACH prefix for every voice burst (single channel)
++      uint8_t d_mid[6][24];      // middle field (24 dibits) per superframe burst A..F:
++                                 //   A = voice sync, B..E = embedded-LC fragments, F = CC-only EMB
++      int d_vc;                  // voice-burst index within the superframe (0..5)
++      int d_preamble;            // idle bursts still to send before the header (receiver sync acquisition)
++      int d_headers;             // voice LC headers still to send at call start
++      bool d_idle_next;          // emit a 144-dibit idle after each content burst (DMR 288-dibit cadence)
++      bool d_send_term;          // set by send_terminator(); the next drained output appends d_term
++      bool d_sent_term;
++
++     public:
++      dmr_ms_tx_bb_impl(int verbose_flag, const char * config_file);
++      ~dmr_ms_tx_bb_impl();
++
++      void send_terminator();    // Python calls this on PTT release to append the call terminator
++
++      void forecast(int noutput_items, gr_vector_int &ninput_items_required);
++      int general_work(int noutput_items,
++                       gr_vector_int &ninput_items,
++                       gr_vector_const_void_star &input_items,
++                       gr_vector_void_star &output_items);
++    };
++
++  } // namespace op25_repeater
++} // namespace gr
++
++#endif /* INCLUDED_OP25_REPEATER_DMR_MS_TX_BB_IMPL_H */
+diff --git a/op25/gr-op25_repeater/lib/dmr_slot.cc b/op25/gr-op25_repeater/lib/dmr_slot.cc
+index 47c71c05..01ff2d37 100644
+--- a/op25/gr-op25_repeater/lib/dmr_slot.cc
++++ b/op25/gr-op25_repeater/lib/dmr_slot.cc
+@@ -256,11 +256,12 @@ dmr_slot::decode_csbk(uint8_t* csbk) {
+ 		return false;
+ #endif
+ 
+-	// pack and send up the stack
+-	std::string csbk_msg(10,0);
++	// pack and send up the stack (trailing byte: color code, see decode_vlch)
++	std::string csbk_msg(11,0);
+ 	for (int i = 0; i < 80; i++) {
+ 		csbk_msg[i/8] = (csbk_msg[i/8] << 1) + csbk[i];
+ 	}
++	csbk_msg[10] = d_cc;
+ 	send_msg(csbk_msg, M_DMR_SLOT_CSBK);
+ 
+ 	// Extract parameters for logging purposes
+@@ -560,11 +561,13 @@ dmr_slot::decode_vlch(uint8_t* vlch) {
+ 	if (!rc)
+ 		return false;
+ 
+-	// send up the stack
+-	std::string lc_msg(12,0);
++	// send up the stack (trailing byte: color code, not part of the LC itself
++	// but the only place the msgq consumer can learn it)
++	std::string lc_msg(13,0);
+ 	for (int i = 0; i < 12; i++) {
+ 		lc_msg[i] = d_lc[i];
+ 	}
++	lc_msg[12] = d_cc;
+ 	send_msg(lc_msg, M_DMR_SLOT_VLC);
+ 
+ 	if (d_debug >= 10) {
+@@ -587,11 +590,12 @@ dmr_slot::decode_tlc(uint8_t* tlc) {
+ 	if (!rc)
+ 		return false;
+ 
+-	// send up the stack
+-	std::string lc_msg(12,0);
++	// send up the stack (trailing byte: color code, see decode_vlch)
++	std::string lc_msg(13,0);
+ 	for (int i = 0; i < 12; i++) {
+ 		lc_msg[i] = d_lc[i];
+ 	}
++	lc_msg[12] = d_cc;
+ 	send_msg(lc_msg, M_DMR_SLOT_TLC);
+ 
+ 	if (d_debug >= 10) {
+@@ -794,11 +798,12 @@ dmr_slot::decode_embedded_lc() {
+ #endif
+ 		d_lc_valid = true;
+ 
+-		// send up the stack
+-		std::string lc_msg(9,0);
++		// send up the stack (trailing byte: color code, see decode_vlch)
++		std::string lc_msg(10,0);
+ 		for (int i = 0; i < 9; i++) {
+ 			lc_msg[i] = d_lc[i];
+ 		}
++		lc_msg[9] = d_cc;
+ 		send_msg(lc_msg, M_DMR_SLOT_ELC);
+ 
+ 		if (d_debug >=10) {
+diff --git a/op25/gr-op25_repeater/lib/dmr_slot.h b/op25/gr-op25_repeater/lib/dmr_slot.h
+index e44d3f23..e7a96e7e 100644
+--- a/op25/gr-op25_repeater/lib/dmr_slot.h
++++ b/op25/gr-op25_repeater/lib/dmr_slot.h
+@@ -70,6 +70,11 @@ public:
+ 	inline void set_debug(const int debug) { d_debug = debug; };
+ 	bool load_slot(const uint8_t slot[], uint64_t sl_type);
+ 	inline void set_slot_mask(int mask) { d_slot_mask = mask; };
++	inline uint8_t get_cc() { return d_cc; };
++	// The color code is the carrier's, the same on both timeslots: a slot that hasn't learned one (0)
++	// takes the other slot's, so a voice call with no data burst on its own slot (no header, as from a
++	// base station that starts straight in voice superframes) still has its EMBs accepted.
++	inline void adopt_cc(uint8_t cc) { if (d_cc == 0x0) d_cc = cc; };
+ 
+ private:
+ 	uint8_t     d_slot[SLOT_SIZE];	// array of bits comprising the current slot
+diff --git a/op25/gr-op25_repeater/lib/p25p1_voice_encode.cc b/op25/gr-op25_repeater/lib/p25p1_voice_encode.cc
+index 9f97293c..8184fd1a 100644
+--- a/op25/gr-op25_repeater/lib/p25p1_voice_encode.cc
++++ b/op25/gr-op25_repeater/lib/p25p1_voice_encode.cc
+@@ -150,7 +150,133 @@ static void clear_bits(bit_vector& v) {
+ 	}
+ }
+ 
++/* ------------------------------------------------------------------------
++ * Runtime P25 NAC and Link Control.
++ *
++ * op25's historic transmitter baked NAC 0x293 into the NID words (hws[]) and a
++ * fixed Link Control into ldu1_preset[] (LCF 0 / MFID 0 / TGID 0x5555 / src
++ * 0xAAAAAA). A licensed operator keying a specific repeater needs the NAC
++ * settable, and a repeater that validates the LC needs a real one. These
++ * helpers compute both at runtime. The FEC is ported verbatim from op25's own
++ * apps/tx/p25craft.py (bch_64_16_23_encode / rs_24_12_13_encode /
++ * hamming_10_6_3_encode), so a frame round-trips through op25's own receiver
++ * (lib/bch.cc, lib/p25p1_fdma.cc). Verified in Python against the baked hws[]
++ * and ldu1_preset[] before this was written: the default NAC/LC reproduce them
++ * bit for bit.
++ * ---------------------------------------------------------------------- */
++
++// (64,16,23) BCH NID encoder (p25craft.bch_64_16_23_encode).
++static uint64_t bch_64_16_23_encode(uint16_t data) {
++	static const uint64_t matrix[16] = {
++		0x8000cd930bdd3b2aULL, 0x4000ab5a8e33a6beULL,
++		0x2000983e4cc4e874ULL, 0x10004c1f2662743aULL,
++		0x0800eb9c98ec0136ULL, 0x0400b85d47ab3bb0ULL,
++		0x02005c2ea3d59dd8ULL, 0x01002e1751eaceecULL,
++		0x0080170ba8f56776ULL, 0x0040c616dfa78890ULL,
++		0x0020630b6fd3c448ULL, 0x00103185b7e9e224ULL,
++		0x000818c2dbf4f112ULL, 0x0004c1f2662743a2ULL,
++		0x0002ad6a38ce9afbULL, 0x00019b2617ba7657ULL };
++	uint64_t cw = 0;
++	for (int i = 0; i < 16; i++)
++		if (data & (0x8000 >> i)) cw ^= matrix[i];
++	return cw;
++}
++
++// GF(2^6) multiply, primitive poly x^6+x+1 (p25craft.gf6mult).
++static uint8_t gf6mult(uint8_t a, uint8_t b) {
++	uint8_t p = 0;
++	for (int i = 0; i < 6; i++) {
++		if (b & 1) p ^= a;
++		a <<= 1;
++		if (a & 0x40) a ^= 0x43;
++		b >>= 1;
++	}
++	return p & 0x3f;
++}
++
++// (24,12,13) shortened Reed-Solomon LC encoder: 12 hexbits in -> 24 hexbits out
++// (p25craft.rs_24_12_13_encode).
++static const uint8_t rs_24_12_13_matrix[12][24] = {
++	{1,0,0,0,0,0,0,0,0,0,0,0,062,044,003,025,014,016,027,003,053,004,036,047},
++	{0,1,0,0,0,0,0,0,0,0,0,0,011,012,011,011,016,064,067,055,001,076,026,073},
++	{0,0,1,0,0,0,0,0,0,0,0,0,003,001,005,075,014,006,020,044,066,006,070,066},
++	{0,0,0,1,0,0,0,0,0,0,0,0,021,070,027,045,016,067,023,064,073,033,044,021},
++	{0,0,0,0,1,0,0,0,0,0,0,0,030,022,003,075,015,015,033,015,051,003,053,050},
++	{0,0,0,0,0,1,0,0,0,0,0,0,001,041,027,056,076,064,021,053,004,025,001,012},
++	{0,0,0,0,0,0,1,0,0,0,0,0,061,076,021,055,076,001,063,035,030,013,064,070},
++	{0,0,0,0,0,0,0,1,0,0,0,0,024,022,071,056,021,035,073,042,057,074,043,076},
++	{0,0,0,0,0,0,0,0,1,0,0,0,072,042,005,020,043,047,033,056,001,016,013,076},
++	{0,0,0,0,0,0,0,0,0,1,0,0,072,014,065,054,035,025,041,016,015,040,071,026},
++	{0,0,0,0,0,0,0,0,0,0,1,0,073,065,036,061,042,022,017,004,044,020,025,005},
++	{0,0,0,0,0,0,0,0,0,0,0,1,071,005,055,003,071,034,060,011,074,002,041,050}};
++
++static void rs_24_12_13_encode(const uint8_t hexbits[12], uint8_t cw[24]) {
++	for (int i = 0; i < 24; i++) cw[i] = 0;
++	for (int i = 0; i < 24; i++)
++		for (int j = 0; j < 12; j++)
++			cw[i] ^= gf6mult(hexbits[j], rs_24_12_13_matrix[j][i]);
++}
++
++// (10,6,3) shortened Hamming encoder (p25craft.hamming_10_6_3_encode).
++static uint16_t hamming_10_6_3_encode(uint8_t data) {
++	static const uint16_t matrix[6] = {0x20e, 0x10d, 0x08b, 0x047, 0x023, 0x01c};
++	uint16_t cw = 0;
++	for (int i = 0; i < 6; i++)
++		if (data & (0x20 >> i)) cw ^= matrix[i];
++	return cw;
++}
++
++// Build the 18-octet (144-bit) Link Control Word integer from its fields
++// (p25craft.construct_lc; LCF high byte, MFID, service options, then group
++// (lco 0) or individual (lco 3) addressing, then the source ID).
++static void construct_lcw(uint8_t lco, uint8_t mfid, uint8_t svcopt, uint8_t s,
++                          uint16_t tgid, uint32_t dst, uint32_t src,
++                          uint64_t& hi, uint64_t& lo) {
++	// 72-bit LC: [lcf 8][mfid 8][svcopt 8][addressing 24][src 24].
++	// Split across two 64-bit halves (hi holds the top 8 bits).
++	uint64_t lcf = lco;              // construct_lcf(0,0,lco): p=sf=0
++	__uint128_t lc = (__uint128_t)lcf << 64;
++	lc |= (__uint128_t)mfid << 56;
++	lc |= (__uint128_t)svcopt << 48;
++	if (lco == 0) {                  // group call
++		lc |= (__uint128_t)(s & 1) << 32;
++		lc |= (__uint128_t)(tgid & 0xffff) << 24;
++	} else {                         // individual call (lco == 3)
++		lc |= (__uint128_t)(dst & 0xffffff) << 24;
++	}
++	lc |= (src & 0xffffff);
++	hi = (uint64_t)(lc >> 64) & 0xff;
++	lo = (uint64_t)lc;
++}
++
++// Overlay a Hamming-encoded Link Control onto the 240 LC bit positions of an
++// LDU1 frame body (op25_imbe_frame.h: imbe_ldu_ls_data_bits[0..239]).
++static void overlay_ldu1_lc(bit_vector& frame_body,
++                            uint8_t lco, uint8_t mfid, uint8_t svcopt, uint8_t s,
++                            uint16_t tgid, uint32_t dst, uint32_t src) {
++	uint64_t hi, lo;
++	construct_lcw(lco, mfid, svcopt, s, tgid, dst, src, hi, lo);
++	// The 72-bit LC as 12 hexbits (6 bits each), MSB first: hexbit 0 is bits
++	// 71..66, which live in `hi` (bits 71..64) + the top of `lo`.
++	__uint128_t lc72 = ((__uint128_t)(hi & 0xff) << 64) | lo;
++	uint8_t hexbits[12];
++	for (int j = 0; j < 12; j++)
++		hexbits[j] = (uint8_t)((lc72 >> ((11 - j) * 6)) & 0x3f);
++	uint8_t rs[24];
++	rs_24_12_13_encode(hexbits, rs);
++	// 24 hexbits -> 24 x 10-bit Hamming -> 240 bits, MSB first, into the LC
++	// positions.
++	int k = 0;
++	for (int i = 0; i < 24; i++) {
++		uint16_t h = hamming_10_6_3_encode(rs[i]);
++		for (int b = 9; b >= 0; b--)
++			frame_body[imbe_ldu_ls_data_bits[k++]] = (h >> b) & 1;
++	}
++}
++
+ p25p1_voice_encode::p25p1_voice_encode(bool verbose_flag, int stretch_amt, op25_audio& udp, bool raw_vectors_flag, std::deque<uint8_t> &_output_queue) :
++	opt_nac(0x293),       // historic op25 default NAC; set_nac() overrides
++	opt_lc_set(false),    // overlay a custom Link Control only once set_lc() ran
+ 	frame_cnt(0),
+ 	write_bufp(0),
+ 	peak_amplitude(0),
+@@ -199,14 +325,22 @@ void p25p1_voice_encode::append_imbe_codeword(bit_vector& frame_body, int16_t fr
+ 
+ 	// after the ninth and final codeword added, dispose of frame
+ 	if (++codeword_ct >= nof_voice_codewords) {
+-		static const uint64_t hws[2] = { 0x293555ef2c653437LL, 0x293aba93bec26a2bLL };
+                 int ldu_type = frame_cnt & 1;	// set ldu_type = 0(LDU1) or 1(LDU2)
++		// NID word carries the (runtime) NAC and the DUID (0x5 LDU1, 0xA LDU2),
++		// BCH(64,16,23)-encoded (was baked as hws[] for NAC 0x293).
++		static const int duids[2] = { 0x5, 0xA };
++		uint64_t hw = bch_64_16_23_encode((uint16_t)((opt_nac << 4) | duids[ldu_type]));
+ 		const bool* ldu_preset = (ldu_type == 0) ? ldu1_preset : ldu2_preset;
+-		
+-		p25_setup_frame_header(frame_body, hws[ldu_type]);
++
++		p25_setup_frame_header(frame_body, hw);
+ 		for (size_t i = 0; i < frame_body.size(); i++) {
+ 			frame_body[i] = frame_body[i] | ldu_preset[i];
+ 		}
++		// A custom Link Control replaces the preset's baked LC bits in LDU1
++		// (LDU2 carries encryption sync / low-speed data, left as the preset).
++		if (opt_lc_set && ldu_type == 0)
++			overlay_ldu1_lc(frame_body, lc_lco, lc_mfid, lc_svcopt, lc_s,
++			                lc_tgid, lc_dst, lc_src);
+ 		// finally, output the frame
+ 		if (op25audio.enabled()) {
+ 			// pack the bits into bytes, MSB first
+@@ -321,5 +455,18 @@ p25p1_voice_encode::set_gain_adjust(float gain_adjust) {
+ 	vocoder.set_gain_adjust(gain_adjust);
+ }
+ 
++void
++p25p1_voice_encode::set_nac(uint16_t nac) {
++	opt_nac = nac & 0xfff;
++}
++
++void
++p25p1_voice_encode::set_lc(uint8_t lco, uint8_t mfid, uint8_t svcopt, uint8_t s,
++                           uint16_t tgid, uint32_t dst, uint32_t src) {
++	lc_lco = lco; lc_mfid = mfid; lc_svcopt = svcopt; lc_s = s;
++	lc_tgid = tgid; lc_dst = dst; lc_src = src;
++	opt_lc_set = true;
++}
++
+   } /* namespace op25_repeater */
+ } /* namespace gr */
+diff --git a/op25/gr-op25_repeater/lib/p25p1_voice_encode.h b/op25/gr-op25_repeater/lib/p25p1_voice_encode.h
+index b73152fe..e5ddc808 100644
+--- a/op25/gr-op25_repeater/lib/p25p1_voice_encode.h
++++ b/op25/gr-op25_repeater/lib/p25p1_voice_encode.h
+@@ -46,7 +46,17 @@ namespace gr {
+       ~p25p1_voice_encode();
+ 	void compress_samp(const int16_t * samp, int len);
+       void set_gain_adjust(float gain_adjust);
++      // Set the P25 NAC and Link Control at runtime (the defaults reproduce the
++      // fixed NAC 0x293 and the preset LC).
++      void set_nac(uint16_t nac);
++      void set_lc(uint8_t lco, uint8_t mfid, uint8_t svcopt, uint8_t s,
++                  uint16_t tgid, uint32_t dst, uint32_t src);
+   private:
++	uint16_t opt_nac;         // 12-bit P25 network access code (default 0x293)
++	bool opt_lc_set;          // true once set_lc() ran: overlay a custom LC
++	uint8_t  lc_lco, lc_mfid, lc_svcopt, lc_s;
++	uint16_t lc_tgid;
++	uint32_t lc_dst, lc_src;
+ 	static const int RXBUF_MAX = 80;
+ 
+ 	/* data items */
+diff --git a/op25/gr-op25_repeater/lib/vocoder_impl.cc b/op25/gr-op25_repeater/lib/vocoder_impl.cc
+index 2e5599a4..310cd513 100644
+--- a/op25/gr-op25_repeater/lib/vocoder_impl.cc
++++ b/op25/gr-op25_repeater/lib/vocoder_impl.cc
+@@ -178,5 +178,16 @@ vocoder_impl::set_gain_adjust(float gain_adjust) {
+ 	p1voice_encode.set_gain_adjust(gain_adjust);
+ }
+ 
++void
++vocoder_impl::set_nac(int nac) {
++	p1voice_encode.set_nac((uint16_t)nac);
++}
++
++void
++vocoder_impl::set_lc(int lco, int mfid, int svcopt, int s, int tgid, int dst, int src) {
++	p1voice_encode.set_lc((uint8_t)lco, (uint8_t)mfid, (uint8_t)svcopt, (uint8_t)s,
++	                      (uint16_t)tgid, (uint32_t)dst, (uint32_t)src);
++}
++
+   } /* namespace op25_repeater */
+ } /* namespace gr */
+diff --git a/op25/gr-op25_repeater/lib/vocoder_impl.h b/op25/gr-op25_repeater/lib/vocoder_impl.h
+index 4984f5fa..32ae555c 100644
+--- a/op25/gr-op25_repeater/lib/vocoder_impl.h
++++ b/op25/gr-op25_repeater/lib/vocoder_impl.h
+@@ -48,6 +48,8 @@ namespace gr {
+ 
+       void forecast (int noutput_items, gr_vector_int &ninput_items_required);
+       void set_gain_adjust(float gain_adjust);
++      void set_nac(int nac);
++      void set_lc(int lco, int mfid, int svcopt, int s, int tgid, int dst, int src);
+ 
+       int general_work(int noutput_items,
+ 		       gr_vector_int &ninput_items,
+diff --git a/op25/gr-op25_repeater/python/op25_repeater/bindings/CMakeLists.txt b/op25/gr-op25_repeater/python/op25_repeater/bindings/CMakeLists.txt
+index ca40f6bf..7dc3fc52 100644
+--- a/op25/gr-op25_repeater/python/op25_repeater/bindings/CMakeLists.txt
++++ b/op25/gr-op25_repeater/python/op25_repeater/bindings/CMakeLists.txt
+@@ -33,6 +33,7 @@ list(APPEND op25_repeater_python_files
+     analog_udp_python.cc
+     costas_loop_cc_python.cc
+     dmr_bs_tx_bb_python.cc
++    dmr_ms_tx_bb_python.cc
+     dstar_tx_sb_python.cc
+     frame_assembler_python.cc
+     fsk4_slicer_fb_python.cc
+diff --git a/op25/gr-op25_repeater/python/op25_repeater/bindings/dmr_ms_tx_bb_python.cc b/op25/gr-op25_repeater/python/op25_repeater/bindings/dmr_ms_tx_bb_python.cc
+new file mode 100644
+index 00000000..a5a44da6
+--- /dev/null
++++ b/op25/gr-op25_repeater/python/op25_repeater/bindings/dmr_ms_tx_bb_python.cc
+@@ -0,0 +1,42 @@
++/*
++ * Copyright 2023 Free Software Foundation, Inc.
++ *
++ * This file is part of GNU Radio
++ *
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ *
++ */
++
++/***********************************************************************************/
++/* This file is automatically generated using bindtool and can be manually
++ * edited  */
++/* BINDTOOL_GEN_AUTOMATIC(0) */
++/* BINDTOOL_USE_PYGCCXML(0) */
++/* BINDTOOL_HEADER_FILE(dmr_ms_tx_bb.h) */
++/* BINDTOOL_HEADER_FILE_HASH(a7fbe0251045b22c04ef0e3c32ce02e8) */
++/***********************************************************************************/
++
++#include <pybind11/complex.h>
++#include <pybind11/pybind11.h>
++#include <pybind11/stl.h>
++
++namespace py = pybind11;
++
++#include <gnuradio/op25_repeater/dmr_ms_tx_bb.h>
++#include <dmr_ms_tx_bb_pydoc.h>
++
++void bind_dmr_ms_tx_bb(py::module &m) {
++
++  using dmr_ms_tx_bb = ::gr::op25_repeater::dmr_ms_tx_bb;
++
++  py::class_<dmr_ms_tx_bb, gr::block, gr::basic_block,
++             std::shared_ptr<dmr_ms_tx_bb>>(m, "dmr_ms_tx_bb", D(dmr_ms_tx_bb))
++
++      .def(py::init(&dmr_ms_tx_bb::make), py::arg("verbose_flag"),
++           py::arg("config_file"), D(dmr_ms_tx_bb, make))
++
++      .def("send_terminator", &dmr_ms_tx_bb::send_terminator,
++           D(dmr_ms_tx_bb, send_terminator))
++
++      ;
++}
+diff --git a/op25/gr-op25_repeater/python/op25_repeater/bindings/docstrings/dmr_ms_tx_bb_pydoc_template.h b/op25/gr-op25_repeater/python/op25_repeater/bindings/docstrings/dmr_ms_tx_bb_pydoc_template.h
+new file mode 100644
+index 00000000..6a7b597b
+--- /dev/null
++++ b/op25/gr-op25_repeater/python/op25_repeater/bindings/docstrings/dmr_ms_tx_bb_pydoc_template.h
+@@ -0,0 +1,25 @@
++/*
++ * Copyright 2023 Free Software Foundation, Inc.
++ *
++ * This file is part of GNU Radio
++ *
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ *
++ */
++#include "pydoc_macros.h"
++#define D(...) DOC(gr, op25_repeater, __VA_ARGS__)
++/*
++  This file contains placeholders for docstrings for the Python bindings.
++  Do not edit! These were automatically extracted during the binding process
++  and will be overwritten during the build process
++ */
++
++static const char *__doc_gr_op25_repeater_dmr_ms_tx_bb = R"doc()doc";
++
++static const char *__doc_gr_op25_repeater_dmr_ms_tx_bb_dmr_ms_tx_bb =
++    R"doc()doc";
++
++static const char *__doc_gr_op25_repeater_dmr_ms_tx_bb_make = R"doc()doc";
++
++static const char *__doc_gr_op25_repeater_dmr_ms_tx_bb_send_terminator =
++    R"doc()doc";
+diff --git a/op25/gr-op25_repeater/python/op25_repeater/bindings/python_bindings.cc b/op25/gr-op25_repeater/python/op25_repeater/bindings/python_bindings.cc
+index 6ed9dbb0..33a0a3d9 100644
+--- a/op25/gr-op25_repeater/python/op25_repeater/bindings/python_bindings.cc
++++ b/op25/gr-op25_repeater/python/op25_repeater/bindings/python_bindings.cc
+@@ -25,6 +25,7 @@ namespace py = pybind11;
+     void bind_analog_udp(py::module& m);
+     void bind_costas_loop_cc(py::module& m);
+     void bind_dmr_bs_tx_bb(py::module& m);
++    void bind_dmr_ms_tx_bb(py::module& m);
+     void bind_dstar_tx_sb(py::module& m);
+     void bind_frame_assembler(py::module& m);
+     void bind_fsk4_slicer_fb(py::module& m);
+@@ -66,6 +67,7 @@ PYBIND11_MODULE(op25_repeater_python, m)
+         bind_analog_udp(m);
+         bind_costas_loop_cc(m);
+         bind_dmr_bs_tx_bb(m);
++        bind_dmr_ms_tx_bb(m);
+         bind_dstar_tx_sb(m);
+         bind_frame_assembler(m);
+         bind_fsk4_slicer_fb(m);
+diff --git a/op25/gr-op25_repeater/python/op25_repeater/bindings/vocoder_python.cc b/op25/gr-op25_repeater/python/op25_repeater/bindings/vocoder_python.cc
+index 0131746b..3bdad479 100644
+--- a/op25/gr-op25_repeater/python/op25_repeater/bindings/vocoder_python.cc
++++ b/op25/gr-op25_repeater/python/op25_repeater/bindings/vocoder_python.cc
+@@ -16,7 +16,7 @@
+ /* BINDTOOL_GEN_AUTOMATIC(0) */
+ /* BINDTOOL_USE_PYGCCXML(0) */
+ /* BINDTOOL_HEADER_FILE(vocoder.h)                                        */
+-/* BINDTOOL_HEADER_FILE_HASH(6f5e665b6482d7f4d3874d01016ca78f) */
++/* BINDTOOL_HEADER_FILE_HASH(188fbe26c927b88102d559ede7b8dd44) */
+ /***********************************************************************************/
+ 
+ #include <pybind11/complex.h>
+@@ -43,5 +43,11 @@ void bind_vocoder(py::module &m) {
+       .def("set_gain_adjust", &vocoder::set_gain_adjust, py::arg("gain_adjust"),
+            D(vocoder, set_gain_adjust))
+ 
++      // P25 TX NAC and Link Control (no pydoc entries yet: bound without D())
++      .def("set_nac", &vocoder::set_nac, py::arg("nac"))
++
++      .def("set_lc", &vocoder::set_lc, py::arg("lco"), py::arg("mfid"),
++           py::arg("svcopt"), py::arg("s"), py::arg("tgid"), py::arg("dst"), py::arg("src"))
++
+       ;
+ }

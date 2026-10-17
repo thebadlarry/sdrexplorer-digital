@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# external builds made from patches/ (the install script builds into <install>/ext/)
+ext/
+
+# editor / agent tooling (per developer)
+.idea/
+.vscode/
+.claude/
+.mcp.json
+AGENTS.md
+.gemini/
+.cursor/
+.aider*
+.codex/
+
+# runtime files written when tests or the app run in this directory
+.gnuradio/
+
+# Private notes and prototypes: not published. notes/ is its own private git repo.
+/notes/
+
+# Claude Code project notes (machine paths, private state): never published
+/CLAUDE.md

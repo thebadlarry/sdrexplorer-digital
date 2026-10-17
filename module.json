@@ -1,0 +1,81 @@
+{
+  "name": "digital",
+  "title": "Digital voice: op25 + dsd-fme",
+  "api": ">=1.0,<2.0",
+  "pip": [
+    "numpy>=1.24",
+    "scipy>=1.8"
+  ],
+  "ext": [
+    {
+      "key": "op25",
+      "name": "op25 (boatbod)",
+      "for": "P25, DMR, SmartNet decode; P25 / DMR transmit",
+      "repo": "https://github.com/boatbod/op25.git",
+      "commit": "da5374d",
+      "patches": [
+        "patches/op25-sdrexplorer.patch"
+      ],
+      "build": {
+        "system": "cmake",
+        "args": [
+          "-DCMAKE_BUILD_TYPE=Release"
+        ]
+      },
+      "optional": true,
+      "apt": [
+        "libitpp-dev",
+        "libpcap-dev",
+        "libsndfile1-dev",
+        "libspdlog-dev",
+        "liborc-0.4-dev",
+        "libhackrf-dev",
+        "librtlsdr-dev",
+        "python3-numpy",
+        "python3-requests",
+        "python3-waitress"
+      ],
+      "paths": {
+        "op25_apps": "{src}/op25/gr-op25_repeater/apps"
+      }
+    },
+    {
+      "name": "mbelib",
+      "for": "the AMBE / IMBE vocoders dsd-fme decodes voice with",
+      "repo": "https://github.com/lwvmobile/mbelib.git",
+      "commit": "30dc790",
+      "build": {
+        "system": "cmake",
+        "args": [
+          "-DCMAKE_BUILD_TYPE=Release"
+        ]
+      },
+      "install_into": "dsd_fme",
+      "optional": true
+    },
+    {
+      "key": "dsd_fme",
+      "name": "dsd-fme",
+      "for": "NXDN48 / NXDN96 and EDACS decode, the decoder proofs",
+      "repo": "https://github.com/lwvmobile/dsd-fme.git",
+      "commit": "69d3115",
+      "build": {
+        "system": "cmake",
+        "args": [
+          "-DCMAKE_BUILD_TYPE=Release"
+        ]
+      },
+      "optional": true,
+      "apt": [
+        "libsndfile1-dev",
+        "libncurses-dev",
+        "libpulse-dev",
+        "librtlsdr-dev",
+        "libcodec2-dev"
+      ]
+    }
+  ],
+  "platforms": [
+    "linux"
+  ]
+}
